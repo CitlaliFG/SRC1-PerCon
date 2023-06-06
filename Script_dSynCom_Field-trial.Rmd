@@ -1,0 +1,713 @@
+---
+title: "Defined synthetic microbial communities colonize and benefit field-grown sorghum"
+author: "Citlali Fonseca-Garcia"
+date: '2023-05-31'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown  
+This script is a modified version of the Rmd file included in the manuscript "Drought shifts sorghum root metabolite and microbiome profiles and enriches the stress response factor pipecolic acid" designed by Daniel Caddel.  
+
+This document includes analyses of the 16S rRNA amplicon sequencing of root and rhizosphere from the dSynCom PerCon/NIFA2022 field experiment.
+
+The following scripts should run as is assuming you have downloaded all data and markdown files to the same directory. 
+
+## load packages
+```{r}
+library(dada2);packageVersion("dada2")
+library(phyloseq); packageVersion("phyloseq")
+library(ape);packageVersion("ape")
+library(data.table);packageVersion("data.table")
+library(ggplot2); packageVersion("ggplot2")
+library(reshape2); packageVersion("reshape2")
+library(dplyr); packageVersion("dplyr")
+library(RColorBrewer); packageVersion("RColorBrewer")
+library(beepr); packageVersion("beepr")
+library(scales); packageVersion("scales")
+library(grid); packageVersion("grid")
+library(ggalt); packageVersion("ggalt")
+library(mctoolsr); packageVersion("mctoolsr")
+library(vegan); packageVersion("vegan")
+library(agricolae);packageVersion("agricolae")
+library(patchwork);packageVersion("patchwork")
+library(ggfortify);packageVersion("ggfortify")
+library(stringr);packageVersion("stringr")
+library(multcompView);packageVersion("multcompView")
+library(pheatmap);packageVersion("pheatmap")
+theme_set(theme_bw()) #Define a default theme for ggplot graphics.
+
+#setwd("/set/working/directory/location/")
+```
+
+## import OTU biom file, sample file, and tree file, then build phyloseq object  
+update file locations with correct paths
+```{r}
+biom_file <- "merged-feature-tableField.biom" #update path info
+map_file <- "sample-metadata-final_feature_Field.txt" #update path info
+otutax <- import_biom(biom_file, parseFunction = parse_taxonomy_default)
+sam <- import_qiime_sample_data(map_file)
+all <- merge_phyloseq(otutax, sam)
+all
+
+colnames(tax_table(all)) <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+colnames(tax_table(all))
+```
+
+## Remove mitochondrial and chloroplast reads from a phyloseq object (Illumina).  
+A full list of related functions are in 'functions_for16SData.Rmd'.  
+
+This chunk has been modified from code originally written by Alex Styer.
+```{r}
+
+remove_mitoAndChloro <- function(x){#where x is a merged phyloseq object
+  df <- as.data.frame(tax_table(x))
+  setDT(df, keep.rownames = TRUE)
+  colnames(df)[1] <- "ASV"
+  allASVs <- df[,1]
+  mito <- filter(df, df$Family == "f__Mitochondria")
+  chloro <- filter(df, df$Order == "o__Chloroplast")
+  contam <- as.vector(rbind(mito, chloro)$ASV)
+  ASVs_toKeep <- as.vector(subset(allASVs, !(ASV %in% contam))$ASV)
+  num_mito <- nrow(mito)
+  num_chloro <- nrow(chloro)
+  cat(sprintf("%i and %s ASVs were removed as pesky mitochondria or chloroplast, respectively.\nKhaleesi frees these bacterial slaves to the wild binary yonder.", num_mito, num_chloro))
+  x <- prune_taxa(ASVs_toKeep, x)
+}
+```
+
+## Clean up taxonomy
+Takes a psmelted phyloseq object and cleans up greengenes-format taxonomies.  
+i.e. removes the "d__" in d__Domain.  
+Also takes NA values and unassigned taxa and renames their taxonomy as "Unknown".
+This chunk has been modified from code originally written by Alex Styer.
+```{r}
+cleanup_taxonomy <- function(x){ #to be used on dfs made from melted phyloseq objects
+  x$Domain <- as.character(lapply(x$Domain, sub, pattern = "d__", replacement = ""))
+  x$Phylum <- as.character(lapply(x$Phylum, sub, pattern = "p__", replacement = ""))
+  x$Class <- as.character(lapply(x$Class, sub, pattern = "c__", replacement = ""))
+  x$Order <- as.character(lapply(x$Order, sub, pattern = "o__", replacement = ""))
+  x$Family <- as.character(lapply(x$Family, sub, pattern = "f__", replacement = ""))
+  x$Genus <- as.character(lapply(x$Genus, sub, pattern = "g__", replacement = ""))
+  x$Species <- as.character(lapply(x$Species, sub, pattern = "s__", replacement = ""))
+  x$Domain <- ifelse(x$Domain == "", "Unknown", as.character(x$Domain))
+  x$Phylum <- ifelse(x$Phylum == "", "Unknown", as.character(x$Phylum))
+  x$Class <- ifelse(x$Class == "", "Unknown", as.character(x$Class))
+  x$Order <- ifelse(x$Order == "", "Unknown", as.character(x$Order))
+  x$Family <- ifelse(x$Family == "", "Unknown", as.character(x$Family))
+  x$Genus <- ifelse(x$Genus == "", "Unknown", as.character(x$Genus))
+  x$Species <- ifelse(x$Species == "", "Unknown", as.character(x$Species))
+  x$Domain <- ifelse(is.na(x$Domain) == TRUE , "Unknown", as.character(x$Domain))
+  x$Phylum <- ifelse(is.na(x$Phylum) == TRUE , "Unknown", as.character(x$Phylum))
+  x$Class <- ifelse(is.na(x$Class) == TRUE , "Unknown", as.character(x$Class))
+  x$Order <- ifelse(is.na(x$Order) == TRUE , "Unknown", as.character(x$Order))
+  x$Family <- ifelse(is.na(x$Family) == TRUE , "Unknown", as.character(x$Family))
+  x$Genus <- ifelse(is.na(x$Genus) == TRUE , "Unknown", as.character(x$Genus))
+  x$Species <- ifelse(is.na(x$Species) == TRUE , "Unknown", as.character(x$Species))
+  x <- x
+}
+```
+
+## Additional Phyloseq tools  
+
+A quantitative/informative tool for deciding which number of top ASVs to keep for stacked bar plots.  
+Takes a phyloseq object and plots each ASV's relative abundance against its rank from 1-N (1 being most abundant, N least).  
+Also prints to console summary statistics decribing the number of ASVs that represent a given fraction of readcounts.
+This chunk has been modified from code originally written by Alex Styer.
+```{r}
+plot_relAbund_curve <- function(x){
+  df <- as.data.frame(rowSums(otu_table(x)))
+  setDT(df, keep.rownames = TRUE)
+  colnames(df) <- c("ASV", "ASV_sum")
+  all_sum <- sum(df$ASV_sum)
+  df$ASV_relAbund <- df$ASV_sum/all_sum
+  df <- df[order(-ASV_relAbund)]
+  df$ASV_rank <- 1:nrow(df)
+  
+  #a function to get percentiles
+  get_percentile <- function(y, n){#n is a double between 0-1; the output will tell you the smallest number of ASVs that account for that perecnt relative abundance in your dataset.
+    row = 1
+    num = 0
+    while(num<=n){
+      num = sum(y$ASV_relAbund[1:row])
+      row = row + 1
+    }
+    y$ASV_rank[row-1]
+  }
+  
+  #a function to print percentiles to console
+  print_percentiles <- function(a,b,c,d,e,f,g,h,i){
+    cat(sprintf("the top %i ASVs = ~10%% of all reads
+the top %i ASVs = ~20%% of all reads
+the top %i ASVs = ~30%% of all reads
+the top %i ASVs = ~40%% of all reads
+the top %i ASVs = ~50%% of all reads
+the top %i ASVs = ~60%% of all reads
+the top %i ASVs = ~70%% of all reads
+the top %i ASVs = ~80%% of all reads
+the top %i ASVs = ~90%% of all reads"
+                ,a,b,c,d,e,f,g,h,i))
+  }
+  
+  #get summary statistics
+  mean_relabund <- mean(df$ASV_relAbund)
+  per10 <- get_percentile(df, .1)
+  per20 <- get_percentile(df, .2)
+  per25 <- get_percentile(df, .25)
+  per30 <- get_percentile(df, .3)
+  per40 <- get_percentile(df, .4)
+  per50 <- get_percentile(df, .5)
+  per60 <- get_percentile(df, .6)
+  per70 <- get_percentile(df, .7)
+  per75 <- get_percentile(df, .75)
+  per80 <- get_percentile(df, .8)
+  per90 <- get_percentile(df, .9)
+  
+  #set plot aesthetics and add-ons
+  x_title <- scale_x_continuous(name = "ASV Rank", breaks = seq(0, max(df$ASV_rank), by = 10))
+  y_title <- scale_y_continuous(name = "ASV Relative Abundance")
+  vline25 <- geom_vline(xintercept = per25, color="#444546")
+  vline25_text <- geom_text(aes(x=per25, y=(max(df$ASV_relAbund)/2), label=(sprintf("top %i ASVs = ~25%% reads", per25))), vjust=-1, angle=90, size=10/.pt, color="#444546", check_overlap = TRUE)
+  vline50 <- geom_vline(xintercept = per50, color="#444546")
+  vline50_text <- geom_text(aes(x=per50, y=(max(df$ASV_relAbund)/2), label=(sprintf("top %i ASVs = ~50%% reads", per50))), vjust=-1, angle=90, size=10/.pt, color="#444546", check_overlap = TRUE)
+  vline75 <- geom_vline(xintercept = per75, color="#444546")
+  vline75_text <- geom_text(aes(x=per75, y=(max(df$ASV_relAbund)/2), label=(sprintf("top %i ASVs = ~75%% reads", per75))), vjust=-1, angle=90, size=10/.pt,color="#444546", check_overlap = TRUE)
+  hline_mean <- geom_hline(yintercept = mean_relabund, color="#a04344")
+  hline_mean_text <- geom_text(aes(x=(max(df$ASV_rank)/2), y=mean_relabund, label=(sprintf("mean relative abundance = %f", mean_relabund))), vjust = -1, size=10/.pt,color="#a04344", check_overlap = TRUE)
+
+  #plot ASV rank by relative abundance
+  if (nrow(df)<=300) {
+    print_percentiles(per10, per20, per30, per40, per50, per60, per70, per80, per90)
+    ggplot(df, aes(x=ASV_rank, y=ASV_relAbund)) + 
+      geom_point() +
+      list(x_title, y_title, vline25, vline25_text, vline50, vline50_text, vline75, vline75_text, hline_mean, hline_mean_text)
+  }else{
+    if (nrow(df)>300 && per75<=300) {
+      df <- df[1:300]
+      cat("Trimming data to top 300 ASVs for plot readability\nSummary statistics represent all input ASVs\n")
+      print_percentiles(per10, per20, per30, per40, per50, per60, per70, per80, per90)
+      ggplot(df, aes(x=ASV_rank, y=ASV_relAbund)) + 
+        geom_point() +
+        list(x_title, y_title, vline25, vline25_text, vline50, vline50_text, vline75, vline75_text, hline_mean, hline_mean_text)
+    }else{
+      if (nrow(df)>300 && per50<=300 && per75>300) {
+        df <- df[1:300]
+        cat("Trimming data to top 300 ASVs for plot readability\nSummary statistics represent all input ASVs\n")
+        print_percentiles(per10, per20, per30, per40, per50, per60, per70, per80, per90)
+        ggplot(df, aes(x=ASV_rank, y=ASV_relAbund)) + 
+          geom_point() +
+          list(x_title, y_title, vline25, vline25_text, vline50, vline50_text, hline_mean, hline_mean_text)
+      }else{
+        if (nrow(df)>300 && per25<=300 && per50>300) {
+          df <- df[1:300]
+          cat("Trimming data to top 300 ASVs for plot readability\nSummary statistics represent all input ASVs\n")
+          print_percentiles(per10, per20, per30, per40, per50, per60, per70, per80, per90)
+          ggplot(df, aes(x=ASV_rank, y=ASV_relAbund)) + 
+            geom_point() +
+            list(x_title, y_title, vline25, vline25_text, hline_mean, hline_mean_text)
+        }else{
+          df <- df[1:300]
+          cat("Trimming data to top 300 ASVs for plot readability\nSummary statistics represent all input ASVs\n")
+          print_percentiles(per10, per20, per30, per40, per50, per60, per70, per80, per90)
+          ggplot(df, aes(x=ASV_rank, y=ASV_relAbund)) + 
+            geom_point() +
+            list(x_title, y_title, hline_mean, hline_mean_text)
+        }
+      }
+    }
+  } 
+}
+```
+
+Now run the cleanup functions to remove any remaining mitochondria and chloroplast sequences.  
+Also melt phyloseq object into a dataframe and transform sample counts for further analyses.  
+```{r}
+all.clean <- remove_mitoAndChloro(all)
+all.clean.df <- psmelt (all.clean)
+all.clean.df <- cleanup_taxonomy(all.clean.df)
+#transform data
+all.trans <- transform_sample_counts(all.clean, function(OTU) 100*OTU/sum(OTU))
+#merge groups within transformed data
+all.trans.merge <- merge_samples(all.trans, "Group")
+all.trans.merge <- transform_sample_counts(all.trans.merge, function(OTU) 100*OTU/sum(OTU))
+all.tm.df<- psmelt(all.trans.merge)
+all.tm.df <- cleanup_taxonomy(all.tm.df) #NOTE: some columns were messed up during merge_samples
+
+#if you want to leave all the samples and plot a RA graph
+#all.tm.df<- psmelt(all.trans)
+#all.tm.df <- cleanup_taxonomy(all.tm.df)
+
+beep(4)
+```
+
+## Save the session so that it can be loaded later without having to rerun this step.
+This will save time compared to reruning the code above.
+```{r eval=FALSE, include=TRUE}
+save.image("~phyloseq_illuminaASV.rdata")
+#close R, re-open R
+load("~phyloseq_illuminaASV.rdata")
+```
+
+Check the total reads per sample, and the distribution of reads.
+```{r}
+readsumsdf = data.frame(nreads = sort(taxa_sums(all.clean), TRUE), sorted = 1:ntaxa(all.clean), 
+                        type = "OTUs")
+readsumsdf = rbind(readsumsdf, data.frame(nreads = sort(sample_sums(all.clean), 
+                                                        TRUE), sorted = 1:nsamples(all), type = "Samples"))
+title = "Total number of reads"
+p = ggplot(readsumsdf, aes(x = sorted, y = nreads)) + geom_bar(stat = "identity")
+p + ggtitle(title) + scale_y_log10() + facet_wrap(~type, 1, scales = "free")
+
+plot_relAbund_curve(all.clean) # this function is from 'functions_for16SData.Rmd'
+```
+
+## Alpha Diversity   
+Note: this analysis is performed using rarefied data, which differs from the transformation method performed on the data above.
+```{r}
+set.seed(42)
+all_rare<-rarefy_even_depth(all.clean, rngseed = TRUE)
+#sanity check
+par(mfrow = c(1, 2))
+title = "Sum of reads for each sample, all_rare"
+plot(sort(sample_sums(all_rare), TRUE), type = "h", main = title, ylab = "reads") 
+#, ylim = c(0, 1000))
+
+richness = estimate_richness(all_rare,measures = "Shannon")
+richness
+```
+
+ANOVA of alpha-diversity and Tukey-HSD posthoc test
+```{r}
+temp.aov <- sample_data(all.clean)
+temp.aov <- temp.aov[,c(1:12)]
+temp.aov$ST <- paste0(temp.aov$Treatment, temp.aov$Water.Media, temp.aov$Sampletype.Week) #add column to see if sample diversity changes with timepoint
+data.aov <- cbind(temp.aov, richness)
+data.aov
+
+#write a file as a backup
+write.table(data.aov, file = "~data.aov.csv", append = FALSE, quote = TRUE, sep = ",", row.names = TRUE, col.names = TRUE)
+
+#Homoscedasticity verification: Bartlett test
+Bartlet <- bartlett.test(Shannon ~ Group, data = data_new)
+
+#ANOVA posthoc test: Tukey-HSD
+all_aov <- aov(Shannon ~ Group, data = data_new)
+summary(all_aov)
+all_aov_tukey <- HSD.test(all_aov, 'Group')
+all_aov_tukey 
+
+
+```
+
+Plot of Shannon Diversity Index, Supplemental figure 6A
+```{r}
+# Duplicate data
+data_new <- data.aov                             
+data_new$Group <- factor(data_new$Group, c("Mock_Watered_Rh_I1","SynCom_Watered_Rh_I1","Mock_Drought_Rh_I1","SynCom_Drought_Rh_I1", "Mock_Watered_R_I1","SynCom_Watered_R_I1","Mock_Drought_R_I1","SynCom_Drought_R_I1","Mock_Watered_Rh_I2","SynCom_Watered_Rh_I2","Mock_Drought_Rh_I2","SynCom_Drought_Rh_I2","Mock_Watered_R_I2","SynCom_Watered_R_I2","Mock_Drought_R_I2","SynCom_Drought_R_I2")) # Reorder factor levels
+
+p<-ggplot(data_new, aes(x=Group, y=Shannon, fill=Group)) + xlab("") + ylab("Shannon index")+
+  geom_boxplot(position=position_dodge(1)) + theme(axis.text.x = element_text(size=12,angle = 90, hjust=1, face="bold"),axis.text.y = element_text(size=12, face="bold"),legend.position="none")
+p
+
+# Change colors
+p2<- p+scale_fill_manual(values=c("lightskyblue1","mediumblue","lightgoldenrod1","darkorange","lightskyblue3","navy", "lightgoldenrod3","darkorange3","lightskyblue1","mediumblue","lightgoldenrod1","darkorange","lightskyblue3","navy", "lightgoldenrod3","darkorange3"))
+p2
+
+ggsave("Alpha-diversity.png", plot=p2, width=9, height=7, dpi=600)
+
+
+```
+
+## Beta Diversity
+Beta diversity (PCoA and CAP) of sorghum root and rhizosphere samples inoculated onto seeds or seedlings in both water treatments. Supplemental figure 6A, Figure 5B-E and Supplemental figure 7
+
+```{r}
+
+#Plot MDS with all factors
+ord.mds.bray <- ordinate(all.trans, method="MDS", distance="bray")
+p1d <- phyloseq::plot_ordination(all.trans, ord.mds.bray, color="SampleWater",
+ shape="Treatment", title="Bray-Curtis distance")+
+          geom_vline(xintercept = 0,linetype="longdash",color="gray")+
+          geom_hline(yintercept = 0,linetype="longdash",color="gray")+ scale_shape_manual(values = c(18, 17, 15, 19)) +  geom_point( size = 7) +
+          scale_color_manual(values=c("#cdbe70","#cb9e59","#4d5b6a","#7997a1","#686a47","peachpuff3"))+
+          theme(axis.text.x=element_text(size=14,color="black",angle=0), 
+                axis.text.y=element_text(size=14,color="black"), 
+                axis.title=element_text(size=14,face="bold"), 
+                text=element_text(size=14, face="bold"),
+                plot.title=element_text(size=15,hjust= 0.5, vjust=2),
+                legend.title=element_text(size=14), 
+                legend.text=element_text(size=13))
+p1d
+
+
+ggsave("Beta-diversityD2Rh.png", plot = p1d, width=11.5, height=9, dpi=600)
+
+
+#Plot CAP for each sample type, water treatment, and dSynCom inoculation time point conditions.
+#Note: this section of the script runs with a simplified metadata for each condition, also provided in the repository.
+
+ord.cap.bray <- ordinate(all.trans, method="CAP", distance="bray", ~Treatment)
+p1d <- phyloseq::plot_ordination(all.trans, ord.mds.bray, color="Treatment", shape = "Tier",
+  title="")+
+          geom_vline(xintercept = 0,linetype="longdash",color="gray")+
+          geom_hline(yintercept = 0,linetype="longdash",color="gray")+ scale_shape_manual(values = c(17, 17, 15, 19)) +  geom_point( size = 13) +
+          scale_color_manual(values=c("lightgoldenrod1","darkorange","lightskyblue1","mediumblue"))+ 
+         theme(axis.text.x=element_text(size=15,color="black",angle=0), 
+                axis.text.y=element_text(size=15,color="black"), 
+                axis.title=element_text(size=16,face="bold"), 
+                text=element_text(size=16, face="bold"),
+                plot.title=element_text(size=15,hjust= 0.5, vjust=2),
+                legend.title=element_text(size=16), 
+                legend.text=element_text(size=15))
+p1d
+
+ggsave("Beta-diversityD2Rh.png", plot = p1d, width=11.5, height=9, dpi=600)
+```
+
+Adonis test and pairwise permanova posthoc test for MDS plot and permutest for CAP plots
+```{r}
+#adonis test: permanova
+ps.prop_dist <- distance(all.trans, method = "bray")
+ps.prop_data <- data.frame(sample_data(all.trans))
+summary(ps.prop_data)
+test <- adonis(ps.prop_dist ~ Treatment +Water	+ Sampletype +	Inoculation +Group, data = ps.prop_data)
+View(test)
+write.table(test[["aov.tab"]], file = "~aov.tab_Global.csv", append = FALSE, quote = TRUE, sep = ",", row.names = TRUE, col.names = TRUE)
+
+
+#permutest
+CAP.summary <- summary(ord.cap.bray)
+pmod <- permutest(ord.cap.bray, permutations = 999, pairwise = TRUE)
+
+```
+
+## Relative abundance
+I renamed the samples, and set the order that they will appear (x-axis) for supplemental Figure 8 and 9.  
+```{r}
+#ploting rhizosphere samples
+SampleOrder <-   scale_x_discrete(limits = c("w1_2_1_11_Rh", "w1_2_1_12_Rh", "w1_2_1_13_Rh", "w1_2_1_3_Rh", "w1_2_1_9_Rh", "w1_3_1_23_Rh", "w1_3_1_26_Rh", "w1_3_1_27_Rh", "w1_3_1_29_Rh", "w1_3_1_31_Rh", "w2_2_1_14_Rh", "w2_2_1_17_Rh", "w2_2_1_18_Rh", "w2_2_1_19_Rh", "w2_2_1_20_Rh", "w2_3_1_35_Rh", "w2_3_1_37_Rh", "w2_3_1_38_Rh", "w2_3_1_39_Rh", "w2_3_1_40_Rh", "w1_8_1_123_Rh", "w1_8_1_125_Rh", "w1_8_1_126_Rh", "w1_8_1_127_Rh", "w1_8_1_129_Rh", "w1_9_1_141_Rh", "w1_9_1_142_Rh", "w1_9_1_146_Rh", "w1_9_1_148_Rh", "w1_9_1_149_Rh", "w2_8_1_131_Rh", "w2_9_1_159_Rh", "w2_8_1_133_Rh", "w2_8_1_135_Rh", "w2_8_1_140_Rh", "w2_9_1_151_Rh", "w2_9_1_152_Rh", "w2_9_1_153_Rh", "w2_9_1_154_Rh", "w2_8_1_132_Rh", "d1_12_1_160_Rh", "d1_12_1_162_Rh", "d1_12_1_164_Rh", "d1_12_1_170_Rh", "d1_12_1_171_Rh", "d1_13_1_201_Rh", "d1_13_1_203_Rh", "d1_13_1_205_Rh", "d1_13_1_208_Rh", "d1_13_1_210_Rh", "d2_12_1_166_Rh", "d2_12_1_175_Rh", "d2_12_1_176_Rh", "d2_12_1_178_Rh", "d2_12_1_200_Rh", "d2_13_1_211_Rh", "d2_13_1_214_Rh", "d2_13_1_216_Rh", "d2_13_1_218_Rh", "d2_13_1_219_Rh", "d1_18_1_321_Rh", "d1_18_1_323_Rh", "d1_18_1_326_Rh", "d1_18_1_328_Rh", "d1_18_1_330_Rh", "d1_19_1_341_Rh", "d1_19_1_344_Rh", "d1_19_1_346_Rh", "d1_19_1_348_Rh", "d1_19_1_350_Rh", "d2_18_1_325_Rh", "d2_18_1_335_Rh", "d2_18_1_337_Rh", "d2_18_1_338_Rh", "d2_18_1_340_Rh", "d2_19_1_351_Rh", "d2_19_1_354_Rh", "d2_19_1_355_Rh", "d2_19_1_357_Rh", "d2_19_1_360_Rh", "w1_2_2_11_Rh", "w1_2_2_12_Rh", "w1_2_2_13_Rh", "w1_2_2_3_Rh", "w1_2_2_9_Rh", "w1_3_2_23_Rh", "w1_3_2_26_Rh", "w1_3_2_27_Rh", "w1_3_2_29_Rh", "w1_3_2_31_Rh", "w2_2_2_14_Rh", "w2_2_2_17_Rh", "w2_2_2_18_Rh", "w2_2_2_19_Rh", "w2_2_2_20_Rh", "w2_3_2_35_Rh", "w2_3_2_37_Rh", "w2_3_2_38_Rh", "w2_3_2_39_Rh", "w2_3_2_40_Rh", "w1_8_2_123_Rh", "w1_8_2_125_Rh", "w1_8_2_126_Rh", "w1_8_2_127_Rh", "w1_8_2_129_Rh", "w1_9_2_141_Rh", "w1_9_2_142_Rh", "w1_9_2_146_Rh", "w1_9_2_148_Rh", "w1_9_2_149_Rh", "w2_8_2_131_Rh", "w2_9_2_159_Rh", "w2_8_2_133_Rh", "w2_8_2_135_Rh", "w2_8_2_140_Rh", "w2_9_2_151_Rh", "w2_9_2_152_Rh", "w2_9_2_153_Rh", "w2_9_2_154_Rh", "w2_8_2_132_Rh", "d1_12_2_160_Rh", "d1_12_2_162_Rh", "d1_12_2_164_Rh", "d1_12_2_170_Rh", "d1_12_2_171_Rh", "d1_13_2_201_Rh", "d1_13_2_203_Rh", "d1_13_2_205_Rh", "d1_13_2_208_Rh", "d1_13_2_210_Rh", "d2_12_2_166_Rh", "d2_12_2_175_Rh", "d2_12_2_176_Rh", "d2_12_2_178_Rh", "d2_12_2_200_Rh", "d2_13_2_211_Rh", "d2_13_2_214_Rh", "d2_13_2_216_Rh", "d2_13_2_218_Rh", "d2_13_2_219_Rh", "d1_18_2_321_Rh", "d1_18_2_323_Rh", "d1_18_2_326_Rh", "d1_18_2_328_Rh", "d1_18_2_330_Rh", "d1_19_2_341_Rh", "d1_19_2_344_Rh", "d1_19_2_346_Rh", "d1_19_2_348_Rh", "d1_19_2_350_Rh", "d2_18_2_325_Rh", "d2_18_2_335_Rh", "d2_18_2_337_Rh", "d2_18_2_338_Rh", "d2_18_2_340_Rh", "d2_19_2_351_Rh", "d2_19_2_354_Rh", "d2_19_2_355_Rh", "d2_19_2_357_Rh", "d2_19_2_360_Rh"),      
+                  labels = c("Mock_Watered_Rh_I1",
+"Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1",
+"Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1",
+"Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1","Mock_Watered_Rh_I1",
+"Mock_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1",
+"SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1",
+"SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1",
+"SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1","SynCom_Watered_Rh_I1",
+"SynCom_Watered_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1",
+"Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1",
+"Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1",
+"Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","Mock_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1",
+"SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1",
+"SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1",
+"SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1",
+"SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","SynCom_Drought_Rh_I1","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2",
+"Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2",
+"Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2",
+"Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2",
+"Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","Mock_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2",
+"SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2",
+"SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2",
+"SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2",
+"SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","SynCom_Watered_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2",
+"Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2",
+"Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2",
+"Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2","Mock_Drought_Rh_I2",
+"SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2",
+"SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2",
+"SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2",
+"SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2",
+"SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2","SynCom_Drought_Rh_I2"))
+
+    
+                                  #merged replicates
+ReplicateMerge <- scale_x_discrete(limits = c("Mock_Watered_Rh_I1",
+                                           "SynCom_Watered_Rh_I1",                                                            "Mock_Drought_Rh_I1",
+                                           "SynCom_Drought_Rh_I1",
+                                           "Mock_Watered_Rh_I2",
+                                           "SynCom_Watered_Rh_I2",                                                            "Mock_Drought_Rh_I2",
+                                           "SynCom_Drought_Rh_I2"),
+                                labels = c( "Mock_W_Rh_I1",
+                                           "SynCom_W_Rh_I1",                                                                      "Mock_D_Rh_I1",
+                                           "SynCom_D_Rh_I1",
+                                           "Mock_W_Rhi_I2",
+                                           "SynCom_W_Rh_I2",                                                                      "Mock_D_Rh_I2",
+                                           "SynCom_D_Rh_I2"))
+
+##ploting root samples
+SampleOrder <-   scale_x_discrete(limits = c("w1_2_1_11_R", "w1_2_1_12_R", "w1_2_1_13_R", "w1_2_1_3_R", "w1_2_1_9_R", "w1_3_1_23_R", "w1_3_1_26_R", "w1_3_1_27_R", "w1_3_1_29_R", "w1_3_1_31_R", "w2_2_1_14_R", "w2_2_1_17_R", "w2_2_1_18_R", "w2_2_1_19_R", "w2_2_1_20_R", "w2_3_1_35_R", "w2_3_1_37_R", "w2_3_1_38_R", "w2_3_1_39_R", "w2_3_1_40_R", "w1_8_1_123_R", "w1_8_1_125_R", "w1_8_1_126_R", "w1_8_1_127_R", "w1_8_1_129_R", "w1_9_1_141_R", "w1_9_1_142_R", "w1_9_1_146_R", "w1_9_1_148_R", "w1_9_1_149_R", "w2_8_1_131_R", "w2_8_1_159_R", "w2_8_1_133_R", "w2_8_1_135_R", "w2_8_1_140_R", "w2_9_1_151_R", "w2_9_1_152_R", "w2_9_1_153_R", "w2_9_1_154_R", "w2_9_1_132_R", "d1_12_1_160_R", "d1_12_1_162_R", "d1_12_1_164_R", "d1_12_1_170_R", "d1_12_1_171_R", "d1_13_1_201_R", "d1_13_1_203_R", "d1_13_1_205_R", "d1_13_1_208_R", "d1_13_1_210_R", "d2_12_1_166_R", "d2_12_1_175_R", "d2_12_1_176_R", "d2_12_1_178_R", "d2_12_1_200_R", "d2_13_1_211_R", "d2_13_1_214_R", "d2_13_1_216_R", "d2_13_1_218_R", "d2_13_1_219_R", "d1_18_1_321_R", "d1_18_1_323_R", "d1_18_1_326_R", "d1_18_1_328_R", "d1_18_1_330_R", "d1_19_1_341_R", "d1_19_1_344_R", "d1_19_1_346_R", "d1_19_1_348_R", "d1_19_1_350_R", "d2_18_1_325_R", "d2_18_1_335_R", "d2_18_1_337_R", "d2_18_1_338_R", "d2_18_1_340_R", "d2_19_1_351_R", "d2_19_1_354_R", "d2_19_1_355_R", "d2_19_1_357_R", "d2_19_1_360_R", "w1_2_2_11_R", "w1_2_2_12_R", "w1_2_2_13_R", "w1_2_2_3_R", "w1_2_2_9_R", "w1_3_2_23_R", "w1_3_2_26_R", "w1_3_2_27_R", "w1_3_2_29_R", "w1_3_2_31_R", "w2_2_2_14_R", "w2_2_2_17_R", "w2_2_2_18_R", "w2_2_2_19_R", "w2_2_2_20_R", "w2_3_2_35_R", "w2_3_2_37_R", "w2_3_2_38_R", "w2_3_2_39_R", "w2_3_2_40_R", "w1_8_2_123_R", "w1_8_2_125_R", "w1_8_2_126_R", "w1_8_2_127_R", "w1_8_2_129_R", "w1_9_2_141_R", "w1_9_2_142_R", "w1_9_2_146_R", "w1_9_2_148_R", "w1_9_2_149_R", "w2_8_2_131_R", "w2_9_2_159_R", "w2_8_2_133_R", "w2_8_2_135_R", "w2_8_2_140_R", "w2_9_2_151_R", "w2_9_2_152_R", "w2_9_2_153_R", "w2_9_2_154_R", "w2_8_2_132_R", "d1_12_2_160_R", "d1_12_2_162_R", "d1_12_2_164_R", "d1_12_2_170_R", "d1_12_2_171_R", "d1_13_2_201_R", "d1_13_2_203_R", "d1_13_2_205_R", "d1_13_2_208_R", "d1_13_2_210_R", "d2_12_2_166_R", "d2_12_2_175_R", "d2_12_2_176_R", "d2_12_2_178_R", "d2_12_2_200_R", "d2_13_2_211_R", "d2_13_2_214_R", "d2_13_2_216_R", "d2_13_2_218_R", "d2_13_2_219_R", "d1_18_2_323_R", "d1_18_2_321_R", "d1_18_2_326_R", "d1_18_2_328_R", "d1_18_2_330_R", "d1_19_2_341_R", "d1_19_2_344_R", "d1_19_2_346_R", "d1_19_2_348_R", "d1_19_2_350_R", "d2_18_2_325_R", "d2_18_2_335_R", "d2_18_2_337_R", "d2_18_2_338_R", "d2_18_2_340_R", "d2_19_2_351_R", "d2_19_2_354_R", "d2_19_2_355_R", "d2_19_2_357_R", "d2_19_2_360_R"),     
+                                  labels = c("Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "Mock_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "SynCom_Watered_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "Mock_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "SynCom_Drought_R_I1", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "Mock_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "SynCom_Watered_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "Mock_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2", "SynCom_Drought_R_I2"))
+
+
+ReplicateMerge <- scale_x_discrete(limits = c("Mock_Watered_R_I1",
+                                           "SynCom_Watered_R_I1",                                                            "Mock_Drought_R_I1",
+                                           "SynCom_Drought_R_I1",
+                                           "Mock_Watered_R_I2",
+                                           "SynCom_Watered_R_I2",                                                            "Mock_Drought_R_I2",
+                                           "SynCom_Drought_R_I2"),
+                                labels = c( "Mock_W_R_I1",
+                                           "SynCom_W_R_I1",                                                                      "Mock_D_R_I1",
+                                           "SynCom_D_R_I1",
+                                           "Mock_W_R_I2",
+                                           "SynCom_W_R_I2",                                                                      "Mock_D_R_I2",
+                                           "SynCom_D_R_I2"))
+
+
+
+```
+
+Custom color palette created by Alex Styer, based on Farrow and Ball paints, used for distinguishing bacterial phyla.
+```{r}
+farrowAndBall_palette <- c(
+   "#4d5b6a" #Stiffkey Blue 
+  ,"#6a90b4" #Cook's Blue
+  ,"#599ec4" #ST Giles Blue 
+  ,"#a1c5c8" #Blue Ground 
+  ,"#7997a1" #Stone Blue 
+  ,"#427e83" #Vardo 
+  ,"#84b59c" #Arsenic 
+  ,"#919f70" #Yeabridge Green 
+  ,"#686a47" #Bancha 
+  ,"#c8bd83" #Churlish Green 
+  ,"#cb9e59" #India Yellow 
+  ,"#ecc363" #Babouche 
+  ,"#c57b67" #Red Earth 
+  ,"#d65f3d" #Charlotte's Locks 
+  ,"#a04344" #Incarnadine 
+  ,"#bf7a8f" #Rangwali 
+  ,"#8d8089" #Brassica 
+  ,"#50414c" #Pelt
+  ,"#e5e0db" #Strong White
+  ,"#444546" #Off-Black
+)
+
+
+farrowAndBall_pal <- function() scales::manual_pal(farrowAndBall_palette)
+scale_fill_farrowAndBall <- function(...) ggplot2::discrete_scale('fill', 'farrowAndBall', farrowAndBall_pal(), ...)
+```
+
+Phylum and genus level relative abundances plots, Supplemental Figures 8 and 9.
+```{r message=FALSE, warning=FALSE}
+
+#Phylum level
+phylum_list <- dplyr::select(all.tm.df, Abundance,Phyllum)
+phylum_list <- phylum_list %>% group_by(Phyllum) %>% summarise(Abundance = sum(Abundance))
+keep <- c("Acidobacteriota", "Actinobacteriota","Armatimonadota","Baceroidota","Bdellovibrionota",
+"Chloroflexi","Firmicutes","Gemmatinomadota", "Myxococcota","Patescibacteria","Proteobacteria",
+"Spirochaetota","Verrucomicrobiota")
+phylum_T10 <- phylum_list[phylum_list$Phyllum %in% keep, ]
+phylum_T10 <-phylum_T10[order(phylum_T10$Phyllum, decreasing=TRUE),]
+
+'%ni%' <- Negate('%in%')
+all.tm.df$Phyllum <- as.character(all.tm.df$Phyllum)
+all.tm.df[all.tm.df$Phyllum %ni% phylum_T10$Phyllum,]$Phyllum <-'Other'
+all.tm.df$Phyllum <- as.factor(all.tm.df$Phyllum)
+all.tm.df$Phyllum <- factor(all.tm.df$Phyllum, levels = rev(c(phylum_T10$Phyllum,"Other")))
+
+
+farrowAndBall_ManPal <- c(
+"#4d5b6a", #Stiffkey Blue "other"
+"#599EC4",#Acidobacteriota
+"#5C89A9",#Actinobacteriota
+"#4F8092",#Armatimonadota
+"#41817B",#Baceroidota
+"#3E8B67",#Bdellovibrionota
+"#6BA56F",#Chloroflexi
+"#B3B86A",#Firmicutes 
+"#E6AA59",#Gemmatinomadota
+"#D65F3C",#Myxococcota
+"#B14446",#Patescibacteria
+"#B64759",#Proteobacteria
+"#C55C73",#Spirochaetota
+"#BF7A8F" #Verrucomicrobiota
+  ) 
+
+
+p1b <- ggplot(all.tm.df, aes(x=Sample, y=Abundance, fill=Phylum))+ xlab("") + ylab("Relative abundance")+
+        geom_bar(stat = "identity", position ="stack", width = 0.95)+
+        ReplicateMerge +
+        scale_fill_manual(values = farrowAndBall_ManPal) +
+        guides(color = guide_legend(reverse=TRUE))+
+        ggtitle("") +     
+        theme(axis.text.x=element_text(size=12,angle = 90, hjust=1, face="bold"),
+              plot.title = element_text(lineheight=.8, face="bold"))
+p1b
+
+ggsave("~PlylumRAPlot.png", plot = p1b, width=10, height=6.2, dpi=600)
+
+#Genus level
+#rename some genera
+all.tm.df$Genus <- str_replace(all.tm.df$Genus,"Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium", "Rhizobium")
+all.tm.df$Genus <- str_replace(all.tm.df$Genus,"Burkholderia-Caballeronia-Paraburkholderia", "Burkholderia-Paraburkholderia")
+
+phylum_list <- dplyr::select(all.tm.df, Abundance,Genus)
+phylum_list <- phylum_list %>% group_by(Genus) %>% summarise(Abundance = sum(Abundance))
+keep <- c("Acinetobacter","Bacillus","Brevibacillus","Burkholderia-Paraburkholderia","Chryseobacterium","Enterobacter","Flavobacterium","Kribbella","Lysobacter","Paenibacillus","Paraburkholderia","Pseudomonas","Rhizobium","Rhodoccocus","Sphingobium","Streptomyces")
+phylum_T10 <- phylum_list[phylum_list$Genus %in% keep, ]
+phylum_T10 <-phylum_T10[order(phylum_T10$Genus, decreasing=TRUE),]
+
+'%ni%' <- Negate('%in%')
+all.tm.df$Genus <- as.character(all.tm.df$Genus)
+all.tm.df[all.tm.df$Genus %ni% phylum_T10$Genus,]$Genus <-'Other'
+all.tm.df$Genus <- as.factor(all.tm.df$Genus)
+all.tm.df$Genus <- factor(all.tm.df$Genus, levels = rev(c(phylum_T10$Genus,"Other")))
+
+
+farrowAndBall_ManPal <- c(
+  "#4d5b6a" #Stiffkey Blue "other"
+  ,"#599EC4"#"Acinetobacter"
+  ,"#5C89A9"#"Bacillus"
+  ,"#4F8092"#"Brevibacillus"
+,"#467181"#"Burkholderia-Paraburkholderia"
+,"#41817B"#"Chryseobacterium"
+,"#3E8B67"#"Enterobacter"
+,"#6BA56F"#"Flavobacterium"
+,"#84a56b"#"Kribbella"
+,"#B3B86A"#"Lysobacter"
+,"#E6AA59"#"Paenibacillus"
+#,"#D65F3C"#"Paraburkholderia"
+,"#B14446"#"Pseudomonas"
+,"#B64759"#"Rhizobium"
+#,"#C55C73"#"Rhodoccocus"
+,"#b76981"#"Sphingobium"
+,"#BF7A8F"#"Streptomyces"
+
+  ) 
+
+p1b <- ggplot(all.tm.df, aes(x=Sample, y=Abundance, fill=Genus))+ xlab("") + ylab("Relative abundance")+
+        geom_bar(stat = "identity", position ="stack", width = 0.95)+
+        ReplicateMerge +
+        scale_fill_manual(values = farrowAndBall_ManPal) +
+        guides(color = guide_legend(reverse=TRUE))+
+        ggtitle("") +     
+        theme(axis.text.x=element_text(size=12,angle = 90, hjust=1, face="bold"),
+              plot.title = element_text(lineheight=.8, face="bold"))
+p1b
+
+
+ggsave("~PlylumRAPlot.png", plot = p1b, width=10, height=6.2, dpi=600)
+
+
+```
+
+Heat map of the abundance of each dSynCom member across samples treated with mock or dSynCom once (seeds only) or twice (seeds and 4-weeks old plants). Figure 6
+
+```{r}
+####heatmap for field data
+
+BaseA <- read.table("~MembersASVsumNamesEdited.txt", header=TRUE) #file included 
+BaseA[BaseA == 0] <- 1
+BaseA <- BaseA[,c(1:16)]
+
+pheatmap(BaseA, cluster_cols = FALSE, cluster_rows = FALSE, scale = "none")
+
+# Generate annotations for rows and columns
+annotation_col = data.frame(
+    Sample = factor (rep(c("Root", "Rhizosphere","Root", "Rhizosphere"), c(4,4,4,4))),
+    Treatment = factor (rep(c("Mock_Watered", "SynCom_Watered","Mock_Drought", "SynCom_Drought",
+                            "Mock_Watered", "SynCom_Watered","Mock_Drought", "SynCom_Drought",
+                            "Mock_Watered", "SynCom_Watered","Mock_Drought", "SynCom_Drought",
+                            "Mock_Watered", "SynCom_Watered","Mock_Drought", "SynCom_Drought"), c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1))))
+ 
+rownames(annotation_col) = colnames(BaseA)
+
+##### Reordered by Gram + or - the plot
+annotation_row = data.frame(
+  Genus = factor(rep(c("Kribbella",
+                        "Rhodococcus",
+                        "Streptomyces",
+                        "Bacillus",
+                        "Brevibacillus",
+                        "Paenibacillus",
+                        "Chryseobacterium",
+                        "Flavobacterium",
+                        "Rhizobium",
+                        "Sphingobium",
+                        "Acinetobacter",
+                        "Paraburkholderia",
+                        "Enterobacter",
+                        "Lysobacter",
+                        "Pseudomonas"), c(1,2,3,6,1,3,3,1,1,1,1,2,1,1,7))))
+  
+rownames(annotation_row) = rownames(BaseA)
+# Specify colors
+ann_colors = list(
+  Sample = c(Root="#cd3700", Rhizosphere="#721e00"),
+  Treatment = c(Mock_Watered="lightskyblue1", SynCom_Watered="mediumblue",Mock_Drought="lightgoldenrod1", SynCom_Drought="darkorange"),
+  #Inoculation = c(Inoculated_once="pink", Inoculated_twice="forestgreen"),
+  Genus = c (Kribbella="#B3B86A",
+              Rhodococcus="#C55C73",
+              Streptomyces="#BF7A8F",
+              Bacillus="#5C89A9",
+              Brevibacillus="#4F8092",
+              Paenibacillus="#E6AA59",
+              Chryseobacterium ="#41817B",
+              Flavobacterium="#6BA56F",
+              Rhizobium="#B64759",
+              Sphingobium="#b76981",
+              Acinetobacter="#599EC4",
+              Paraburkholderia="#D65F3C",
+              Enterobacter="#3E8B67",
+              Lysobacter="#dce659",
+              Pseudomonas="#B14446"))
+
+p1b <- pheatmap(log2(BaseA), cluster_cols = FALSE, cluster_rows = FALSE,annotation_col = annotation_col, scale= "column",
+                annotation_row = annotation_row,annotation_colors = ann_colors, gaps_row = c(6, 16, 20, 22), gaps_col = c(8), angle_col = "90",
+                show_rownames = T, show_colnames = F,fontsize = 16, fontsize_col = 14)
+
+ggsave("~HeatmapStrainLog2.png", plot = p1b, width=22, height=10, dpi=600)
+
+```
+
+
+Acidobacteria RA
+```{r}
+#Subset Chryseobacterium
+all.Acido <- subset_taxa(all.trans, Genus %in% c("g__Chryseobacterium"))
+all.Acido.ASV.temp <- psmelt(all.Acido)
+all.Acido.ASV <- subset(all.Acido.ASV.temp, Abundance > 0)
+length(unique(all.Acido.ASV$OTU))
+
+Acido.temp <- as.data.frame(paste(all.Acido.ASV$Group,all.Acido.ASV$Rep,sep="_"))
+Acido.temp$Abundance <- all.Acido.ASV$Abundance
+Acido.temp$OTU <- all.Acido.ASV$OTU
+colnames(Acido.temp)[1] <- "Group"
+Acido.RA <- Acido.temp%>%
+  group_by(Group)%>%
+  summarise(total=sum(Abundance))
+Acido.RA
+#Remove replicate names from Group
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_10", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_11", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_12", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_13", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_14", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_15", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_16", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_17", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_18", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_19", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_20", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_1", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_2", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_3", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_4", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_5", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_6", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_7", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_8", "", x) }))
+Acido.RA <- data.frame(lapply(Acido.RA, function(x) { gsub("_9", "", x) }))
+Acido.RA[,2] <- as.numeric(as.character(Acido.RA[,2]))
+Acido.RA
+#write.csv(Acido.RA,"Acido.summary.csv")
+
+#Perform ANOVA and TukeyHSD posthoc
+Acido_aov <- aov(total ~ Group, data = Acido.RA)
+summary(Acido_aov)
+Acido_tukey <- HSD.test(Acido_aov, 'Group')
+Acido_tukey
+
+```
