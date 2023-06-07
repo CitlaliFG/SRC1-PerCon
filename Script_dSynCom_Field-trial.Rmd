@@ -660,4 +660,80 @@ p1b <- pheatmap(log2(BaseA), cluster_cols = FALSE, cluster_rows = FALSE,annotati
 
 ggsave("~HeatmapStrainLog2.png", plot = p1b, width=22, height=10, dpi=600)
 
+
 ```
+Root phenotyping across samples treated with mock or dSynCom once (seeds only) or twice (seeds and 4-weeks old plants). Supplemental Figure 10
+
+```{r}
+#PCA analysis for all the variables 
+DataBase <- read.table("~RootphynotypingData_OneinoculW.txt", header=TRUE) #update data file 
+Metadata <- read.table("~RootphynotypingMetadataOneW.txt", header=TRUE) #update metadata file 
+
+DataBase <- t(DataBase)
+colnames(DataBase) <- DataBase[1,]
+DataBase <- DataBase[-1, ] 
+DataBase <- as.data.frame(DataBase)
+
+#checking type of data we have
+typeof(DataBase)
+
+#convert the df in numeric
+i <- c(1:78)    # Specify columns you want to change
+DataBase[ , i] <- apply(DataBase[ , i], 2,            # Specify own function within apply
+                    function(x) as.numeric(as.character(x)))
+
+#log transformation
+DataBase <- log(DataBase)
+
+#metadata edition
+rownames(Metadata) <- Metadata[,1]
+Metadata <- Metadata[,-1]
+Metadata <- as.data.frame(Metadata)
+
+#Calculating PCA 
+p <- pca(DataBase, metadata = Metadata, removeVar = 0.1)
+
+getComponents(p)
+
+getVars(p)
+getLoadings(p)
+screeplot(p)
+screeplot(p, hline = 80)
+biplot(p)
+
+#editing original plot 
+p1 <- biplot(p, colby = 'Treatment', colkey = c(Mock='lightskyblue', SynCom='mediumblue'),
+       shape = 'Tier', shapekey = c(A=17, B=17), legendPosition = 'right', legendLabSize = 12,
+       legendIconSize = 10, showLoadings = TRUE, lab = NULL, labSize = 8, pointSize = 10, sizeLoadingsNames = 5)
+
+p1 <- biplot(p, colby = 'Treatment', colkey = c(Mock='lightgoldenrod1', SynCom='darkorange'),
+             shape = 'Tier', shapekey = c(A=17, B=17), legendPosition = 'right', legendLabSize = 12,
+             legendIconSize = 10, showLoadings = TRUE, lab = NULL, labSize = 8, pointSize = 10, sizeLoadingsNames = 6)
+
+
+ggsave("~RootPhynotypingTwoW.png", plot = p1, width=11, height=9, dpi=600)
+
+
+#Calculate PERMANOVA per inoculation time point
+DataBase <- read.table("~RootphynotypingData_Oneinoculation.txt", header=TRUE) #update data file 
+Metadata <- read.table("~RootphynotypingMetadataOne.txt", header=TRUE) #update metadata file 
+
+
+DataBase <- t(DataBase)
+matrix <- vegdist (DataBase, method  = "euclidean")
+
+matrix <- as.matrix (matrix) 
+test <- adonis(matrix ~ Treatment+Water+Group, data = Metadata)
+test[["aov.tab"]]
+write.table(test[["aov.tab"]], file = "~aov.tab_GlobalOne.csv", append = FALSE, quote = TRUE, sep = ",", row.names = TRUE, col.names = TRUE)
+
+#adonis posthoc test: Pairwise permanova per inoculation time point
+
+Metadata$Treatment <- as.factor(Metadata$Treatment)
+Metadata$Water <- as.factor(Metadata$Water)
+Metadata$Group <- as.factor(Metadata$Group)
+calc_pairwise_permanovas(matrix, Metadata, "Treatment")
+testG <- calc_pairwise_permanovas(matrix, Metadata, "Group")
+
+write.table(testG, file = "~aov.tab_pairwiseOne.csv", append = FALSE, quote = TRUE, sep = ",", row.names = TRUE, col.names = TRUE)
+
