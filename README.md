@@ -4,9 +4,9 @@ Citlali Fonseca-García, Andrew Wilson, Joshua Elmore, Dean Pettinga, Ryan McClu
 Included in this repository are...
 
 merged-feature-tableField.biom - an unfiltered ASV table created via QIIME2 and DADA2 with field samples
-sample-metadata-final_feature_Field.txt - all of the metadata associated with field samples
-sample-metadata-final_feature_Field_D2R.txt - metadata of root samples under drought treatment inoculated twice of the field trail
+sample-metadata-final_feature_Field - folder with all of the metadata associated with field samples in txt format
 rep-seqs_Field.fasta - a fasta file of a representative sequence for each ASV for field samples
+Root_phenotyping-files - folder with root phenotyping data of the field trial
 Script_dSynCom_Field-trial.Rmd - an R markdown file with scripts to remake all main and supplemental figures with field samples
 
 Raw sequence files have been uploaded to the NCBI SRA under BioProject XXXX and are publicly available.
