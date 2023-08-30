@@ -1,5 +1,5 @@
 # Defined synthetic microbial communities colonize and benefit field-grown sorghum
-Citlali Fonseca-García, Andrew Wilson, Joshua Elmore, Dean Pettinga, Ryan McClure, Jackie Atim, Julie Pedraza, Robert Hutmacher, Robert Egbert, Devin Coleman-Derr* 
+Citlali Fonseca-García, Dean Pettinga, Andrew Wilson, Joshua Elmore, Ryan McClure, Jackie Atim, Julie Pedraza, Robert Hutmacher, Robert Egbert, Devin Coleman-Derr* 
 
 doi: https://doi.org/10.1101/2023.05.30.542977
 
